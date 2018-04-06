@@ -1,0 +1,18 @@
+<launch>
+  <arg name="robot_name" default="iiwa"/>
+  <arg name="hardware_interface" default="PositionJointInterface"/>
+  <arg name="model" default="iiwa7"/>
+
+  <group ns="$(arg robot_name)">
+    <rosparam command="load" file="$(find iiwa_hw_fri)/config/grl_params_$(arg model).yaml"/>
+
+    <include file="$(find iiwa_description)/launch/$(arg model)_upload.launch"/>
+
+    <!-- Robot interface -->
+    <include file="$(find iiwa_hw_fri)/launch/iiwa_hw_fri.launch" >
+        <arg name="hardware_interface" value="$(arg hardware_interface)" />
+    </include>
+
+  </group>
+
+</launch>
