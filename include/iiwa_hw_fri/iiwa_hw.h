@@ -1,41 +1,56 @@
-/**
- * This class implements a bridge between ROS hardware interfaces and a KUKA LBR IIWA Robot,
- * using an IIWARos communication described in the iiwa_ros package.
- *
- * It is a porting of the work from the Centro E. Piaggio in Pisa : https://github.com/CentroEPiaggio/kuka-lwr
- * for the LBR IIWA. We acknowledge the good work of their main contributors :
- * Carlos J. Rosales - cjrosales@gmail.com
- * Enrico Corvaglia
- * Marco Esposito - marco.esposito@tum.de
- * Manuel Bonilla - josemanuelbonilla@gmail.com
- *
- * LICENSE :
- * Copyright (C) 2016-2017 Salvatore Virga - salvo.virga@tum.de, Marco Esposito - marco.esposito@tum.de
- * Technische Universität München
- * Chair for Computer Aided Medical Procedures and Augmented Reality
- * Fakultät für Informatik / I16, Boltzmannstraße 3, 85748 Garching bei München, Germany
- * http://campar.in.tum.de
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
- * INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY,
- * OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA,
- * OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
- * THE POSSIBILITY OF SUCH DAMAGE.
- */
+/*
+* This class implements a bridge between ROS hardware interfaces and a KUKA LBR IIWA Robot,
+* using KUKA Sunrise.FRI and iiwa_stack repo.
+*
+* It combines multiple works from
+* https://github.com/RobotLocomotion/drake-iiwa-driver.git
+* https://github.com/SalvoVirga/iiwa_stack.git
+* https://github.com/ahundt/grl
+*
+* We acknowledge the good work of the prior contributors :
+* Salvatore Virga - salvo.virga@tum.de, Marco Esposito - marco.esposito@tum.de
+* Andrew Hundt -
+* Carlos J. Rosales - cjrosales@gmail.com
+* Enrico Corvaglia
+* Marco Esposito - marco.esposito@tum.de
+* Manuel Bonilla - josemanuelbonilla@gmail.com
+*
+* LICENSE :
+* Copyright (c) <2018>, <Dinesh Thakur>
+* All rights reserved.
+*
+*
+* Redistribution and use in source and binary forms, with or without
+* modification, are permitted provided that the following conditions are met:
+*
+*   1. Redistributions of source code must retain the above copyright notice,
+*   this list of conditions and the following disclaimer.
+*
+*   2. Redistributions in binary form must reproduce the above copyright notice,
+*   this list of conditions and the following disclaimer in the documentation
+*   and/or other materials provided with the distribution.
+*
+*   3. Neither the name of the University of Pennsylvania nor the names of its
+*   contributors may be used to endorse or promote products derived from this
+*   software without specific prior written permission.
+*
+* THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+* AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+* IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+* DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+* FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+* DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+* SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+* CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+* OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+* OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
 
 #pragma once
 
 // iiwa_msgs and ROS inteface includes
 #include <iiwa_msgs/JointPosition.h>
+#include <iiwa_msgs/JointVelocity.h>
 #include <iiwa_msgs/JointTorque.h>
 #include <iiwa_msgs/ControlMode.h>
 #include <iiwa_msgs/ConfigureSmartServo.h>
@@ -72,7 +87,10 @@ constexpr int IIWA_JOINTS = 7;
       std::vector<double>
       joint_lower_limits, /**< Lower joint limits */
       joint_upper_limits, /**< Upper joint limits */
-      joint_effort_limits; /**< Effort joint limits */
+      joint_lower_soft_limits, /**< Lower joint limits */
+      joint_upper_soft_limits, /**< Upper joint limits */
+      joint_effort_limits, /**< Effort joint limits */
+      joint_velocity_limits; /**< Velocity joint limits */
 
       /**< Joint state and commands */
       std::vector<double>
@@ -83,7 +101,8 @@ constexpr int IIWA_JOINTS = 7;
       joint_position_command,
       joint_stiffness_command,
       joint_damping_command,
-      joint_effort_command;
+      joint_effort_command,
+      joint_velocity_command;
 
       /**
        * \brief Initialze vectors
@@ -97,10 +116,14 @@ constexpr int IIWA_JOINTS = 7;
           joint_effort_command.resize(IIWA_JOINTS);
           joint_stiffness_command.resize(IIWA_JOINTS);
           joint_damping_command.resize(IIWA_JOINTS);
+          joint_velocity_command.resize(IIWA_JOINTS);
 
           joint_lower_limits.resize(IIWA_JOINTS);
           joint_upper_limits.resize(IIWA_JOINTS);
+          joint_lower_soft_limits.resize(IIWA_JOINTS);
+          joint_upper_soft_limits.resize(IIWA_JOINTS);
           joint_effort_limits.resize(IIWA_JOINTS);
+          joint_velocity_limits.resize(IIWA_JOINTS);
       }
 
       /**
@@ -114,6 +137,7 @@ constexpr int IIWA_JOINTS = 7;
               joint_effort[j] = 0.0;
               joint_position_command[j] = 0.0;
               joint_effort_command[j] = 0.0;
+              joint_velocity_command[j] = 0.0;
 
               // set default values for these two for now
               joint_stiffness_command[j] = 0.0;
@@ -130,6 +154,12 @@ public:
   KukaFRIClient(boost::shared_ptr<IIWA_device> device);
 
   ~KukaFRIClient();
+
+  enum CommandType {
+    Position,
+    Velocity,
+    Effort
+  };
 
   /**
   * \brief Callback for FRI state changes.
@@ -160,13 +190,12 @@ public:
   */
   virtual void command();
 
-  void setCommandValid();
+  void setCommandValid(CommandType command_type);
 
 private:
   double ToRadians(double degrees);
   void ApplyJointLimits(double* pos);
   void UpdateRobotState(const KUKA::FRI::LBRState& state);
-
 
   std::vector<double> joint_limits_;
 
@@ -181,6 +210,8 @@ private:
 
   int64_t utime_last_;
   boost::shared_ptr<IIWA_device> device_;
+  CommandType command_type_;
+  bool once_;
 };
 
 class IIWA_HW : public hardware_interface::RobotHW {
@@ -239,10 +270,17 @@ public:
      * Returns the joint's type, lower position limit, upper position limit, and effort limit.
      */
     void registerJointLimits(const std::string& joint_name,
-                             const hardware_interface::JointHandle& joint_handle,
+                             const hardware_interface::JointHandle& position_joint_handle,
+                             const hardware_interface::JointHandle& effort_joint_handle,
                              const urdf::Model *const urdf_model,
                              double *const lower_limit, double *const upper_limit,
+                             double *const lower_soft_limit, double *const upper_soft_limit,
                              double *const effort_limit);
+
+    void registerVelocityJointLimits(const std::string& joint_name,
+                                     const hardware_interface::JointHandle& velocity_joint_handle,
+                                     const urdf::Model *const urdf_model,
+                                     double *const velocity_limit);
 
     /**
      * \brief Reads the current robot state via the IIWARos interfae and sends the values to the IIWA device struct.
@@ -269,6 +307,9 @@ public:
      */
     void setFrequency(double frequency);
 
+    bool prepareSwitch(const std::list<hardware_interface::ControllerInfo>& start_list,
+                             const std::list<hardware_interface::ControllerInfo>& stop_list);
+
 private:
 
     /* Node handle */
@@ -281,12 +322,15 @@ private:
     hardware_interface::JointStateInterface state_interface_; /**< Interface for joint state */
     hardware_interface::EffortJointInterface effort_interface_; /**< Interface for joint impedance control */
     hardware_interface::PositionJointInterface position_interface_; /**< Interface for joint position control */
+    hardware_interface::VelocityJointInterface velocity_interface_; /**< Interface for joint velocity control */
 
     /** Interfaces for limits */
     joint_limits_interface::EffortJointSaturationInterface   ej_sat_interface_;
     joint_limits_interface::EffortJointSoftLimitsInterface   ej_limits_interface_;
     joint_limits_interface::PositionJointSaturationInterface pj_sat_interface_;
     joint_limits_interface::PositionJointSoftLimitsInterface pj_limits_interface_;
+    joint_limits_interface::VelocityJointSaturationInterface vj_sat_interface_;
+    joint_limits_interface::VelocityJointSoftLimitsInterface vj_limits_interface_;
 
     boost::shared_ptr<IIWA_device> device_; /**< IIWA device. */
 
@@ -300,6 +344,7 @@ private:
 
     iiwa_msgs::JointPosition command_joint_position_;
     iiwa_msgs::JointTorque command_joint_torque_;
+    iiwa_msgs::JointVelocity command_joint_velocity_;
 
     std::vector<double> last_joint_position_command_;
 
@@ -316,6 +361,8 @@ private:
     std::unique_ptr<KukaFRIClient> fri_client_;
     std::unique_ptr<KUKA::FRI::ClientApplication> client_app_;
     std::unique_ptr<KUKA::FRI::UdpConnection> udp_connection_;
+
+    bool first_command_;
 };
 
 template <typename T>

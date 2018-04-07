@@ -1,37 +1,50 @@
-/**
- * This class implements a bridge between ROS hardware interfaces and a KUKA LBR IIWA Robot,
- * using an IIWARos communication described in the iiwa_ros package.
- *
- * It is a porting of the work from the Centro E. Piaggio in Pisa : https://github.com/CentroEPiaggio/kuka-lwr
- * for the LBR IIWA. We acknowledge the good work of their main contributors :
- * Carlos J. Rosales - cjrosales@gmail.com
- * Enrico Corvaglia
- * Marco Esposito - marco.esposito@tum.de
- * Manuel Bonilla - josemanuelbonilla@gmail.com
- *
- * LICENSE :
- *
- * Copyright (C) 2016-2017 Salvatore Virga - salvo.virga@tum.de, Marco Esposito - marco.esposito@tum.de
- * Technische Universität München
- * Chair for Computer Aided Medical Procedures and Augmented Reality
- * Fakultät für Informatik / I16, Boltzmannstraße 3, 85748 Garching bei München, Germany
- * http://campar.in.tum.de
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
- * INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY,
- * OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA,
- * OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
- * THE POSSIBILITY OF SUCH DAMAGE.
- */
+/*
+* This class implements a bridge between ROS hardware interfaces and a KUKA LBR IIWA Robot,
+* using KUKA Sunrise.FRI and iiwa_stack repo.
+*
+* It combines multiple works from
+* https://github.com/RobotLocomotion/drake-iiwa-driver.git
+* https://github.com/SalvoVirga/iiwa_stack.git
+* https://github.com/ahundt/grl
+*
+* We acknowledge the good work of the prior contributors :
+* Salvatore Virga - salvo.virga@tum.de, Marco Esposito - marco.esposito@tum.de
+* Andrew Hundt -
+* Carlos J. Rosales - cjrosales@gmail.com
+* Enrico Corvaglia
+* Marco Esposito - marco.esposito@tum.de
+* Manuel Bonilla - josemanuelbonilla@gmail.com
+*
+* LICENSE :
+* Copyright (c) <2018>, <Dinesh Thakur>
+* All rights reserved.
+*
+*
+* Redistribution and use in source and binary forms, with or without
+* modification, are permitted provided that the following conditions are met:
+*
+*   1. Redistributions of source code must retain the above copyright notice,
+*   this list of conditions and the following disclaimer.
+*
+*   2. Redistributions in binary form must reproduce the above copyright notice,
+*   this list of conditions and the following disclaimer in the documentation
+*   and/or other materials provided with the distribution.
+*
+*   3. Neither the name of the University of Pennsylvania nor the names of its
+*   contributors may be used to endorse or promote products derived from this
+*   software without specific prior written permission.
+*
+* THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+* AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+* IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+* DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+* FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+* DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+* SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+* CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+* OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+* OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
 
 #include <iiwa_hw_fri/iiwa_hw.h>
 #include <geometry_msgs/WrenchStamped.h>
@@ -48,6 +61,8 @@ KukaFRIClient::KukaFRIClient(boost::shared_ptr<IIWA_device> device) : device_(de
   inhibit_motion_in_command_state_ = false;
   utime_last_ = -1;
   command_valid_ = false;
+  once_ = false;
+  command_type_ = CommandType::Position;
 }
 
 KukaFRIClient::~KukaFRIClient() {}
@@ -103,7 +118,7 @@ void KukaFRIClient::onStateChange(KUKA::FRI::ESessionState oldState,
                   << std::endl;
       } else {
         inhibit_motion_in_command_state_ = true;
-        std::cerr << "Holding position and ignoring LCM commands.\n"
+        std::cerr << "Holding position and ignoring commands.\n"
                   << std::endl;
       }
 
@@ -126,9 +141,11 @@ void KukaFRIClient::waitForCommand()
   UpdateRobotState(robotState());
 }
 
-void KukaFRIClient::setCommandValid()
+void KukaFRIClient::setCommandValid(CommandType command_type)
 {
+  command_type_ = command_type;
   command_valid_ = true;
+  once_ = true;
 }
 
 void KukaFRIClient::command()
@@ -137,8 +154,6 @@ void KukaFRIClient::command()
   UpdateRobotState(robotState());
 
   double pos[IIWA_JOINTS] = { 0., 0., 0., 0., 0., 0., 0.};
-  //const bool command_valid = lcm_client_->GetPositionCommand(robot_id_, pos);
-
 
   if (inhibit_motion_in_command_state_ || !command_valid_) {
     // No command received, just command the position when we
@@ -149,13 +164,33 @@ void KukaFRIClient::command()
            IIWA_JOINTS * sizeof(double));
 
   } else {
-    // Only apply the joint limits when we're responding to LCM.  If
+    // Only apply the joint limits when we're responding to command.  If
     // we don't want to command motion, don't change anything.
 
     //ApplyJointLimits(pos);
 
-    memcpy(pos, device_->joint_position_command.data(),IIWA_JOINTS * sizeof(double));
-    last_joint_position_command_ = device_->joint_position_command;
+    if(command_type_ == CommandType::Position)
+    {
+
+      //TODO if difference in individual joint is large ignore command and warn?
+
+      memcpy(pos, device_->joint_position_command.data(),IIWA_JOINTS * sizeof(double));
+      last_joint_position_command_ = device_->joint_position_command;
+
+      if(once_)
+      {
+        ROS_ERROR("cmd %g %g %g %g %g %g %g", device_->joint_position_command[0], device_->joint_position_command[1], device_->joint_position_command[2],
+          device_->joint_position_command[3], device_->joint_position_command[4], device_->joint_position_command[5], device_->joint_position_command[6]);
+        once_ = false;
+      }
+
+    }
+    else if(command_type_ == CommandType::Velocity)
+    {
+      assert(last_joint_position_command_.size() == IIWA_JOINTS);
+      memcpy(pos, last_joint_position_command_.data(),
+           IIWA_JOINTS * sizeof(double));
+    }
 
     ROS_WARN("cmd %g %g %g %g %g %g %g", device_->joint_position_command[0], device_->joint_position_command[1], device_->joint_position_command[2],
     device_->joint_position_command[3], device_->joint_position_command[4], device_->joint_position_command[5], device_->joint_position_command[6]);
@@ -188,9 +223,6 @@ void KukaFRIClient::UpdateRobotState(const KUKA::FRI::LBRState& state)
 
   std::memcpy(device_->joint_effort.data(),
               state.getMeasuredTorque(), IIWA_JOINTS * sizeof(double));
-
-  //std::memcpy(lcm_status_.joint_torque_external.data() + joint_offset,
-  //            state.getExternalTorque(), IIWA_JOINTS * sizeof(double));
 
   // Velocity filtering.
   if (robot_dt != 0.)
@@ -228,8 +260,8 @@ IIWA_HW::IIWA_HW(ros::NodeHandle nh)
     loop_rate_ = new ros::Rate(control_frequency_);
 
     interface_type_.push_back("PositionJointInterface");
-    interface_type_.push_back("EffortJointInterface");
     interface_type_.push_back("VelocityJointInterface");
+    interface_type_.push_back("EffortJointInterface");
 
     params_ = std::make_tuple(
         "Robotiiwa"               , // RobotName,
@@ -256,6 +288,8 @@ IIWA_HW::IIWA_HW(ros::NodeHandle nh)
     nh_.getParam("RemoteHostKukaKoniUDPPort",std::get<RemoteHostKukaKoniUDPPort>(params_));
     nh_.getParam("KukaCommandMode",std::get<KukaCommandMode>(params_));
     nh_.getParam("KukaMonitorMode",std::get<KukaMonitorMode>(params_));
+
+    first_command_ = true;
 }
 
 IIWA_HW::~IIWA_HW() {
@@ -330,7 +364,6 @@ bool IIWA_HW::start() {
                                                           &(device_->joint_position[i]),
                                                           &(device_->joint_velocity[i]),
                                                           &(device_->joint_effort[i]));
-
         state_interface_.registerHandle(state_handle);
 
         // position command handle
@@ -340,17 +373,31 @@ bool IIWA_HW::start() {
         position_interface_.registerHandle(position_joint_handle);
 
         // effort command handle
-        hardware_interface::JointHandle joint_handle = hardware_interface::JointHandle(
+        hardware_interface::JointHandle effort_joint_handle = hardware_interface::JointHandle(
             state_interface_.getHandle(device_->joint_names[i]), &device_->joint_effort_command[i]);
 
-        effort_interface_.registerHandle(joint_handle);
+        effort_interface_.registerHandle(effort_joint_handle);
 
         registerJointLimits(device_->joint_names[i],
-                            joint_handle,
+                            position_joint_handle,
+                            effort_joint_handle,
                             &urdf_model_,
                             &device_->joint_lower_limits[i],
                             &device_->joint_upper_limits[i],
+                            &device_->joint_lower_soft_limits[i],
+                            &device_->joint_upper_soft_limits[i],
                             &device_->joint_effort_limits[i]);
+
+        // velocity command handles
+        hardware_interface::JointHandle velocity_joint_handle = hardware_interface::JointHandle(
+            state_interface_.getHandle(device_->joint_names[i]), &device_->joint_velocity_command[i]);
+
+        velocity_interface_.registerHandle(velocity_joint_handle);
+
+        registerVelocityJointLimits(device_->joint_names[i],
+                            velocity_joint_handle,
+                            &urdf_model_,
+                            &device_->joint_velocity_limits[i]);
     }
 
     ROS_INFO("Register state and effort interfaces");
@@ -358,11 +405,12 @@ bool IIWA_HW::start() {
     // TODO: CHECK
     // register ros-controls interfaces
     this->registerInterface(&state_interface_);
-    this->registerInterface(&effort_interface_);
     this->registerInterface(&position_interface_);
+    this->registerInterface(&velocity_interface_);
+    this->registerInterface(&effort_interface_);
 
     js_pub_ = nh_.advertise<sensor_msgs::JointState>("joint_states",100);
-    wrench_pub_ = nh_.advertise<geometry_msgs::WrenchStamped>("state/wrench",100);
+    //wrench_pub_ = nh_.advertise<geometry_msgs::WrenchStamped>("state/wrench",100);
 
     current_js_.name = device_->joint_names;
 
@@ -374,19 +422,22 @@ bool IIWA_HW::start() {
     client_app_.reset(new KUKA::FRI::ClientApplication(*udp_connection_, *fri_client_));
 
     client_app_->connect(DEFAULT_PORTID, NULL);
-    //client_app_->step();
 
     return true;
 }
 
 void IIWA_HW::registerJointLimits(const std::string& joint_name,
-                                  const hardware_interface::JointHandle& joint_handle,
+                                  const hardware_interface::JointHandle& position_joint_handle,
+                                  const hardware_interface::JointHandle& effort_joint_handle,
                                   const urdf::Model *const urdf_model,
                                   double *const lower_limit, double *const upper_limit,
+                                  double *const lower_soft_limit, double *const upper_soft_limit,
                                   double *const effort_limit) {
 
     *lower_limit = -std::numeric_limits<double>::max();
     *upper_limit = std::numeric_limits<double>::max();
+    *lower_soft_limit = -std::numeric_limits<double>::max();
+    *upper_soft_limit = std::numeric_limits<double>::max();
     *effort_limit = std::numeric_limits<double>::max();
 
     joint_limits_interface::JointLimits limits;
@@ -419,11 +470,70 @@ void IIWA_HW::registerJointLimits(const std::string& joint_name,
         *effort_limit = limits.max_effort;
 
     if (has_soft_limits) {
-        const joint_limits_interface::EffortJointSoftLimitsHandle limits_handle(joint_handle, limits, soft_limits);
-        ej_limits_interface_.registerHandle(limits_handle);
+
+        ROS_WARN("Registering Soft limits");
+
+        *lower_soft_limit = soft_limits.min_position;
+        *upper_soft_limit = soft_limits.max_position;
+
+        const joint_limits_interface::PositionJointSoftLimitsHandle position_limits_handle(position_joint_handle, limits, soft_limits);
+        pj_limits_interface_.registerHandle(position_limits_handle);
+
+        const joint_limits_interface::EffortJointSoftLimitsHandle effort_limits_handle(effort_joint_handle, limits, soft_limits);
+        ej_limits_interface_.registerHandle(effort_limits_handle);
+
     } else {
-        const joint_limits_interface::EffortJointSaturationHandle sat_handle(joint_handle, limits);
-        ej_sat_interface_.registerHandle(sat_handle);
+        const joint_limits_interface::PositionJointSaturationHandle position_sat_handle(position_joint_handle, limits);
+        pj_sat_interface_.registerHandle(position_sat_handle);
+
+        const joint_limits_interface::EffortJointSaturationHandle effort_sat_handle(effort_joint_handle, limits);
+        ej_sat_interface_.registerHandle(effort_sat_handle);
+    }
+}
+
+void IIWA_HW::registerVelocityJointLimits(const std::string& joint_name,
+                                  const hardware_interface::JointHandle& velocity_joint_handle,
+                                  const urdf::Model *const urdf_model,
+                                  double *const velocity_limit) {
+
+    *velocity_limit = std::numeric_limits<double>::max();
+
+    joint_limits_interface::JointLimits limits;
+    bool has_limits = false;
+    joint_limits_interface::SoftJointLimits soft_limits;
+    bool has_soft_limits = false;
+
+    if (urdf_model != NULL) {
+        const boost::shared_ptr<const urdf::Joint> urdf_joint = urdf_model->getJoint(joint_name);
+
+        if (urdf_joint != NULL) {
+            // Get limits from the URDF file.
+            if (joint_limits_interface::getJointLimits(urdf_joint, limits))
+                has_limits = true;
+
+            if (joint_limits_interface::getSoftJointLimits(urdf_joint, soft_limits))
+                has_soft_limits = true;
+        }
+    }
+
+    if (!has_limits)
+        return;
+
+    if (limits.has_velocity_limits)
+        *velocity_limit = limits.max_velocity;
+
+    if (has_soft_limits) {
+
+        ROS_ERROR("Registering Velocity Soft limits");
+
+        const joint_limits_interface::VelocityJointSoftLimitsHandle velocity_limits_handle(velocity_joint_handle, limits, soft_limits);
+        vj_limits_interface_.registerHandle(velocity_limits_handle);
+
+
+    } else {
+        const joint_limits_interface::VelocityJointSaturationHandle velocity_sat_handle(velocity_joint_handle, limits);
+        vj_sat_interface_.registerHandle(velocity_sat_handle);
+
     }
 }
 
@@ -435,18 +545,74 @@ bool IIWA_HW::read(ros::Duration period)
 
   ej_sat_interface_.enforceLimits(period);
   ej_limits_interface_.enforceLimits(period);
+  vj_sat_interface_.enforceLimits(period);
+  vj_limits_interface_.enforceLimits(period);
   pj_sat_interface_.enforceLimits(period);
   pj_limits_interface_.enforceLimits(period);
 
   // Joint Position Control
-  if (interface_ == interface_type_.at(0))
+  if (interface_ == "PositionJointInterface")
   {
     if (device_->joint_position_command != last_joint_position_command_)  // avoid sending the same joint command over and over
     {
-      last_joint_position_command_ = device_->joint_position_command;
-
-      fri_client_->setCommandValid();
+      if(first_command_){
+        ROS_WARN("Ignoring Moveit first command");
+        first_command_ = false;
+      }
+      else
+      {
+        last_joint_position_command_ = device_->joint_position_command;
+        fri_client_->setCommandValid(KukaFRIClient::CommandType::Position);
+      }
     }
+  }
+  // Joint Velocity Control
+  else if (interface_ == "VelocityJointInterface")
+  {
+    //ROS_ERROR_STREAM("writing " << device_->joint_position_command);
+    //ROS_ERROR_STREAM("writing vel " << device_->joint_velocity_command);
+
+    std::vector<double> joint_pos_cmd = device_->joint_position_command;
+    std::vector<double> joint_vel_cmd = device_->joint_velocity_command;
+
+    //Get the commanded a7 velocity
+    const int a7_index = IIWA_JOINTS-1;
+    double a7_cmd_vel = joint_vel_cmd[a7_index];
+
+    //Get the a7 joint position
+    double jp = device_->joint_position[a7_index];
+
+    //Get the  a7 joint limits
+    double a7_lower_limit = device_->joint_lower_limits[a7_index];
+    double a7_upper_limit = device_->joint_upper_limits[a7_index];
+
+    //Get the  a7 joint soft limits
+    double a7_lower_soft_limit = device_->joint_lower_soft_limits[a7_index];
+    double a7_upper_soft_limit = device_->joint_upper_soft_limits[a7_index];
+
+    //ROS_ERROR("limits %g %g soft %g %g", a7_lower_limit, a7_upper_limit, a7_lower_soft_limit, a7_upper_soft_limit);
+
+    double a7_joint_velocity_limit = device_->joint_velocity_limits[a7_index];
+
+    //ROS_ERROR("vel limit %g", a7_joint_velocity_limit);
+
+
+    /*
+    // compute the joint displacement over the current period.
+    double dt = period.toSec();
+    double a = 1.0; //Currently relative joint accelearation is 0.6*max_accel for safetly. Unkonwn max value.
+    double cmd_jp = jp + cmd_vel * dt + 0.5*a*dt*dt;
+
+    //Get the  a7 joint soft limits
+    double a7_upper_limit = device_->joint_upper_soft_limits[a7_index];
+    double a7_lower_limit = device_->joint_lower_soft_limits[a7_index];
+
+    ROS_ERROR_STREAM("curr pos" << jp << " cmd pos " << cmd_jp << " loop period " << dt);
+    ROS_ERROR_STREAM("lower lim " << a7_lower_limit << "upper lim " << a7_upper_limit);
+
+    device_->joint_position_command[a7_index] = cmd_jp;
+    last_joint_position_command_ = device_->joint_position_command;
+    */
   }
 
   client_app_->step();
@@ -503,8 +669,41 @@ bool IIWA_HW::write(ros::Duration period)
   else if (interface_ == interface_type_.at(2)) {
       // TODO
   }
-
   */
 
   return 0;
+}
+
+bool IIWA_HW::prepareSwitch(const std::list<hardware_interface::ControllerInfo>& start_list,
+                             const std::list<hardware_interface::ControllerInfo>& stop_list) {
+  bool ready = true;//hardware_interface::RobotHW::prepareSwitch();
+
+  if(ready)
+  {
+    ROS_WARN("Start List");
+    for (std::list<hardware_interface::ControllerInfo>::const_iterator it=start_list.begin(); it != start_list.end(); ++it)
+    {
+      std::string start_controller = (*it).name;
+      ROS_WARN("name: %s type:%s", start_controller.c_str(), (*it).type.c_str());
+
+      if(start_controller == "PositionJointInterface_trajectory_controller")
+      {
+        interface_ = "PositionJointInterface";
+      }
+      else if(start_controller == "VelocityJointInterface_trajectory_controller")
+      {
+        interface_ = "VelocityJointInterface";
+      }
+      else
+        ROS_ERROR("Unknown controller requested");
+    }
+
+    ROS_WARN("Stop List");
+    for (std::list<hardware_interface::ControllerInfo>::const_iterator it=stop_list.begin(); it != stop_list.end(); ++it)
+    {
+      ROS_WARN("name: %s type:%s", (*it).name.c_str(), (*it).type.c_str());
+    }
+
+  }
+  return ready;
 }
