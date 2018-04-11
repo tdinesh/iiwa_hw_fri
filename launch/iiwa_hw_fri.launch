@@ -5,7 +5,7 @@
     <arg name="hardware_interface" default="PositionJointInterface"/>
 
     <!-- LAUNCH IMPLEMENTATION -->
-    <rosparam command="load" file="$(find iiwa_hw)/config/joint_names.yaml" />
+    <rosparam command="load" file="$(find iiwa_hw_fri)/config/joint_names.yaml" />
     <!-- addresses /-->
     <param name="interface" value="$(arg hardware_interface)"/>
 

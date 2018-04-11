@@ -194,7 +194,7 @@ public:
 
 private:
   double ToRadians(double degrees);
-  void ApplyJointLimits(double* pos);
+  void ApplyJointPosLimits(double* pos);
   void UpdateRobotState(const KUKA::FRI::LBRState& state);
 
   std::vector<double> joint_limits_;
@@ -208,7 +208,7 @@ private:
   bool command_valid_;
   std::vector<double> last_joint_position_command_;
 
-  int64_t utime_last_;
+  int64_t utime_last_read_, utime_last_control_;
   boost::shared_ptr<IIWA_device> device_;
   CommandType command_type_;
   bool once_;
@@ -362,7 +362,9 @@ private:
     std::unique_ptr<KUKA::FRI::ClientApplication> client_app_;
     std::unique_ptr<KUKA::FRI::UdpConnection> udp_connection_;
 
-    bool first_command_;
+    bool ready_for_command_;
+    ros::Time ready_for_command_timer_;
+    ros::Duration ignore_command_duration_; //Amount of time to ignore write commands after controller init/switch
 };
 
 template <typename T>

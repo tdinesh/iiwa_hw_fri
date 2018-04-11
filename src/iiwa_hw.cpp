@@ -52,14 +52,15 @@
 using namespace std;
 
 const double kTimeStep = 0.005;
-const double kJointLimitSafetyMarginDegree = 1;
+const double kJointLimitSafetyMarginDegree = 3;
 #define DEFAULT_PORTID 30200
 
 KukaFRIClient::KukaFRIClient(boost::shared_ptr<IIWA_device> device) : device_(device)
 {
   has_entered_command_state_ = false;
   inhibit_motion_in_command_state_ = false;
-  utime_last_ = -1;
+  utime_last_read_ = -1;
+  utime_last_control_ = -1;
   command_valid_ = false;
   once_ = false;
   command_type_ = CommandType::Position;
@@ -103,6 +104,7 @@ void KukaFRIClient::onStateChange(KUKA::FRI::ESessionState oldState,
     if (!has_entered_command_state_)
     {
       has_entered_command_state_ = true;
+      ROS_WARN("FRI in command active state");
     }
     else
     {
@@ -143,6 +145,14 @@ void KukaFRIClient::waitForCommand()
 
 void KukaFRIClient::setCommandValid(CommandType command_type)
 {
+
+  if(!has_entered_command_state_){
+    ROS_WARN("FRI not in commanding state, ignoring");
+    ROS_ERROR("cmd %g %g %g %g %g %g %g", device_->joint_position_command[0], device_->joint_position_command[1], device_->joint_position_command[2],
+        device_->joint_position_command[3], device_->joint_position_command[4], device_->joint_position_command[5], device_->joint_position_command[6]);
+    return;
+  }
+
   command_type_ = command_type;
   command_valid_ = true;
   once_ = true;
@@ -155,6 +165,30 @@ void KukaFRIClient::command()
 
   double pos[IIWA_JOINTS] = { 0., 0., 0., 0., 0., 0., 0.};
 
+  //Get the current state
+  const KUKA::FRI::LBRState& state = robotState();
+
+  //For safety initialize with current position instead of zeros.
+  //These should be overwritten below
+  std::memcpy(pos,
+              state.getMeasuredJointPosition(),
+              IIWA_JOINTS * sizeof(double));
+
+  // Current time stamp for this robot.
+  const int64_t utime_now =
+      state.getTimestampSec() * 1e6 + state.getTimestampNanoSec() / 1e3;
+
+  // Get delta time for this robot.
+  double robot_dt = 0.0;
+  if (utime_last_control_ != -1)
+  {
+    robot_dt = (utime_now - utime_last_control_) / 1e6;
+    // Check timing
+    if (std::abs(robot_dt - kTimeStep) > 1e-3)
+      ROS_WARN_STREAM("Warning: dt " << robot_dt << ", kTimeStep " << kTimeStep);
+  }
+  utime_last_control_ = utime_now;
+
   if (inhibit_motion_in_command_state_ || !command_valid_) {
     // No command received, just command the position when we
     // entered command state.
@@ -163,37 +197,133 @@ void KukaFRIClient::command()
     memcpy(pos, last_joint_position_command_.data(),
            IIWA_JOINTS * sizeof(double));
 
+    if(once_)
+    {
+      ROS_ERROR("cmd %g %g %g %g %g %g %g", device_->joint_position_command[0], device_->joint_position_command[1], device_->joint_position_command[2],
+        device_->joint_position_command[3], device_->joint_position_command[4], device_->joint_position_command[5], device_->joint_position_command[6]);
+      once_ = false;
+    }
   } else {
     // Only apply the joint limits when we're responding to command.  If
     // we don't want to command motion, don't change anything.
 
-    //ApplyJointLimits(pos);
-
     if(command_type_ == CommandType::Position)
     {
+      std::vector<double> commanded_pos = device_->joint_position_command;
 
-      //TODO if difference in individual joint is large ignore command and warn?
+      double current_pos[IIWA_JOINTS] = { 0., 0., 0., 0., 0., 0., 0.};
+      std::memcpy(current_pos, state.getMeasuredJointPosition(),IIWA_JOINTS * sizeof(double));
 
-      memcpy(pos, device_->joint_position_command.data(),IIWA_JOINTS * sizeof(double));
-      last_joint_position_command_ = device_->joint_position_command;
-
-      if(once_)
+      //Enfore velocity limits, skip current command if exceeded.
+      bool valid = false;
+      if (robot_dt != 0.)
       {
-        ROS_ERROR("cmd %g %g %g %g %g %g %g", device_->joint_position_command[0], device_->joint_position_command[1], device_->joint_position_command[2],
-          device_->joint_position_command[3], device_->joint_position_command[4], device_->joint_position_command[5], device_->joint_position_command[6]);
-        once_ = false;
+        valid = true;
+        for (int i = 0; i < IIWA_JOINTS; i++)
+        {
+          double diff = std::abs(commanded_pos[i] - current_pos[i]);
+          if (diff > device_->joint_velocity_limits[i]){
+            valid = false;
+            ROS_ERROR("Command for joint %d exceeds velocity limit", i);
+          }
+        }
       }
 
+      if(valid)
+      {
+        //Enforce joint limits with safety margin
+        ApplyJointPosLimits(commanded_pos.data());
+
+        memcpy(pos, commanded_pos.data(), IIWA_JOINTS * sizeof(double));
+        last_joint_position_command_ = commanded_pos;
+
+        ROS_WARN("Position cmd %g %g %g %g %g %g %g", pos[0],pos[1],pos[2],pos[3],pos[4],pos[5],pos[6]);
+
+      }
+      else{
+        assert(last_joint_position_command_.size() == IIWA_JOINTS);
+        memcpy(pos, last_joint_position_command_.data(),
+             IIWA_JOINTS * sizeof(double));
+      }
     }
     else if(command_type_ == CommandType::Velocity)
     {
+      ROS_WARN("Velocity Command");
+
+      double current_pos[IIWA_JOINTS] = { 0., 0., 0., 0., 0., 0., 0.};
+      std::memcpy(current_pos, state.getMeasuredJointPosition(),IIWA_JOINTS * sizeof(double));
+
+      std::vector<double> joint_vel_cmd = device_->joint_velocity_command;
+      ROS_WARN("%g %g %g %g %g %g %g", joint_vel_cmd[0], joint_vel_cmd[1], joint_vel_cmd[2],
+        joint_vel_cmd[3], joint_vel_cmd[4], joint_vel_cmd[5], joint_vel_cmd[6]);
+
+      std::vector<double> commanded_pos = last_joint_position_command_;
+
+      for (int i = 0; i < IIWA_JOINTS; i++)
+      {
+        //Get the commanded  velocity
+        double cmd_vel = joint_vel_cmd[i];
+        double jp = current_pos[i];
+
+        // compute the joint displacement over the current period.
+        double a = 1.0; //Currently relative joint accelearation is 0.6*max_accel for safetly. Unkonwn max value.
+        double cmd_jp = jp + cmd_vel * robot_dt;// + 0.5*a*dt*dt;
+
+        commanded_pos[i] = cmd_jp;
+      }
+
+      //Enfore velocity limits, skip current command if exceeded.
+      bool valid = false;
+      if (robot_dt != 0.)
+      {
+        valid = true;
+        for (int i = 0; i < IIWA_JOINTS; i++)
+        {
+          double diff = std::abs(commanded_pos[i] - current_pos[i]);
+          if (diff > device_->joint_velocity_limits[i]){
+            valid = false;
+            ROS_ERROR("Command for joint %d exceeds velocity limit", i);
+          }
+        }
+      }
+
+      if(valid)
+      {
+        //Enforce joint limits with safety margin
+        ApplyJointPosLimits(commanded_pos.data());
+
+        std::vector<double> cmd_pos = last_joint_position_command_;
+
+        //Only set the last joint
+        const int a7_index = IIWA_JOINTS - 1;
+        cmd_pos[a7_index] = commanded_pos[a7_index];
+
+        memcpy(pos, cmd_pos.data(), IIWA_JOINTS * sizeof(double));
+        //last_joint_position_command_ = cmd_pos;
+
+        ROS_WARN("cmd %g %g %g %g %g %g %g", pos[0],pos[1],pos[2],pos[3],pos[4],pos[5],pos[6]);
+
+      }
+      else{
+        assert(last_joint_position_command_.size() == IIWA_JOINTS);
+        memcpy(pos, last_joint_position_command_.data(),
+             IIWA_JOINTS * sizeof(double));
+      }
+    }
+    else
+    {
+      ROS_ERROR("Unknown command_type, setting to last command");
       assert(last_joint_position_command_.size() == IIWA_JOINTS);
       memcpy(pos, last_joint_position_command_.data(),
            IIWA_JOINTS * sizeof(double));
     }
 
-    ROS_WARN("cmd %g %g %g %g %g %g %g", device_->joint_position_command[0], device_->joint_position_command[1], device_->joint_position_command[2],
-    device_->joint_position_command[3], device_->joint_position_command[4], device_->joint_position_command[5], device_->joint_position_command[6]);
+    //Ovveride commands
+    ROS_WARN("Ovveride, setting last command");
+    assert(last_joint_position_command_.size() == IIWA_JOINTS);
+    memcpy(pos, last_joint_position_command_.data(),IIWA_JOINTS * sizeof(double));
+    ROS_WARN("cmd %g %g %g %g %g %g %g",pos[0],pos[1],pos[2],pos[3],pos[4],pos[5],pos[6]);
+
   }
   robotCommand().setJointPosition(pos);
 
@@ -208,14 +338,14 @@ void KukaFRIClient::UpdateRobotState(const KUKA::FRI::LBRState& state)
 
   // Get delta time for this robot.
   double robot_dt = 0.0;
-  if (utime_last_ != -1)
+  if (utime_last_read_ != -1)
   {
-    robot_dt = (utime_now - utime_last_) / 1e6;
+    robot_dt = (utime_now - utime_last_read_) / 1e6;
     // Check timing
     if (std::abs(robot_dt - kTimeStep) > 1e-3)
       ROS_WARN_STREAM("Warning: dt " << robot_dt << ", kTimeStep " << kTimeStep);
   }
-  utime_last_ = utime_now;
+  utime_last_read_ = utime_now;
 
   // Set joint states.
   std::memcpy(device_->joint_position.data(),
@@ -240,13 +370,13 @@ double KukaFRIClient::ToRadians(double degrees)
   return degrees * M_PI / 180.;
 }
 
-void KukaFRIClient::ApplyJointLimits(double* pos)
+void KukaFRIClient::ApplyJointPosLimits(double* pos)
 {
   const double joint_tol = ToRadians(kJointLimitSafetyMarginDegree);
   for (int i = 0; i < IIWA_JOINTS; i++)
   {
-    pos[i] = std::max(std::min(pos[i], (joint_limits_[i] - joint_tol)),
-                      ((-joint_limits_[i]) + joint_tol));
+    pos[i] = std::max(std::min(pos[i], (device_->joint_upper_limits[i] - joint_tol)),
+                      ((device_->joint_lower_limits[i]) + joint_tol));
   }
 }
 
@@ -289,8 +419,13 @@ IIWA_HW::IIWA_HW(ros::NodeHandle nh)
     nh_.getParam("KukaCommandMode",std::get<KukaCommandMode>(params_));
     nh_.getParam("KukaMonitorMode",std::get<KukaMonitorMode>(params_));
 
-    first_command_ = true;
-}
+    ready_for_command_ = false;
+    ready_for_command_timer_ = ros::Time::now();
+
+    //Amount of time to ignore write commands after controller init/switch
+    //ROS control initilizes joint_states to zero and starts commanding zeros on init.
+    ignore_command_duration_ = ros::Duration(1.5);
+  }
 
 IIWA_HW::~IIWA_HW() {
 
@@ -343,6 +478,44 @@ bool IIWA_HW::start() {
     // initialize and set to zero the state and command values
     device_->init();
     device_->reset();
+
+    // R820 velocity limits
+    // A1 - 85 °/s  == 1.483529864195 rad/s
+    // A2 - 85 °/s  == 1.483529864195 rad/s
+    // A3 - 100 °/s == 1.745329251994 rad/s
+    // A4 - 75 °/s  == 1.308996938996 rad/s
+    // A5 - 130 °/s == 2.268928027593 rad/s
+    // A6 - 135 °/s == 2.356194490192 rad/s
+    // A1 - 135 °/s == 2.356194490192 rad/s
+    /*
+    KukaState::joint_state scaled_velocity_limits;
+    scaled_velocity_limits.push_back(85);
+    scaled_velocity_limits.push_back(85);
+    scaled_velocity_limits.push_back(100);
+    scaled_velocity_limits.push_back(75);
+    scaled_velocity_limits.push_back(130);
+    scaled_velocity_limits.push_back(135);
+    scaled_velocity_limits.push_back(135);
+    */
+
+    // R800 velocity limits
+    // A1 - 75 °/s  == 1.3089969389957472 rad/s
+    // A2 - 75 °/s  == 1.3089969389957472 rad/s
+    // A3 - 90 °/s == 1.5707963267948966 rad/s
+    // A4 - 90 °/s  == 1.5707963267948966 rad/s
+    // A5 - 144 °/s == 2.5132741228718345 rad/s
+    // A6 - 135 °/s == 2.356194490192345 rad/s
+    // A1 - 135 °/s == 2.356194490192345 rad/s
+
+    const double scale_limit = 0.5; //scale the velocity limits to 50% of max
+    std::vector<double> scaled_velocity_limits;
+    scaled_velocity_limits.push_back( (75 * M_PI/180.0) * scale_limit);
+    scaled_velocity_limits.push_back( (75 * M_PI/180.0) * scale_limit);
+    scaled_velocity_limits.push_back( (90 * M_PI/180.0) * scale_limit);
+    scaled_velocity_limits.push_back( (90 * M_PI/180.0) * scale_limit);
+    scaled_velocity_limits.push_back( (144 * M_PI/180.0) * scale_limit);
+    scaled_velocity_limits.push_back( (135 * M_PI/180.0) * scale_limit);
+    scaled_velocity_limits.push_back( (135 * M_PI/180.0) * scale_limit);
 
     // general joint to store information
     boost::shared_ptr<const urdf::Joint> joint;
@@ -398,6 +571,9 @@ bool IIWA_HW::start() {
                             velocity_joint_handle,
                             &urdf_model_,
                             &device_->joint_velocity_limits[i]);
+
+        ROS_WARN("%d vel limit from urdf %g, setting to %g", i, device_->joint_velocity_limits[i], scaled_velocity_limits[i]);
+        device_->joint_velocity_limits[i] = scaled_velocity_limits[i];
     }
 
     ROS_INFO("Register state and effort interfaces");
@@ -422,6 +598,9 @@ bool IIWA_HW::start() {
     client_app_.reset(new KUKA::FRI::ClientApplication(*udp_connection_, *fri_client_));
 
     client_app_->connect(DEFAULT_PORTID, NULL);
+
+    ready_for_command_ = false;
+    ready_for_command_timer_ = ros::Time::now();
 
     return true;
 }
@@ -555,9 +734,14 @@ bool IIWA_HW::read(ros::Duration period)
   {
     if (device_->joint_position_command != last_joint_position_command_)  // avoid sending the same joint command over and over
     {
-      if(first_command_){
-        ROS_WARN("Ignoring Moveit first command");
-        first_command_ = false;
+      if(!ready_for_command_){
+        ros::Duration dur = ros::Time::now() - ready_for_command_timer_;
+
+        if(dur.toSec() > ignore_command_duration_.toSec())
+          ready_for_command_ = true;
+
+        ROS_WARN("Ignoring command for %g secs %g %g %g %g %g %g %g", (ignore_command_duration_ - dur).toSec(), device_->joint_position_command[0], device_->joint_position_command[1], device_->joint_position_command[2],
+        device_->joint_position_command[3], device_->joint_position_command[4], device_->joint_position_command[5], device_->joint_position_command[6]);
       }
       else
       {
@@ -569,54 +753,26 @@ bool IIWA_HW::read(ros::Duration period)
   // Joint Velocity Control
   else if (interface_ == "VelocityJointInterface")
   {
-    //ROS_ERROR_STREAM("writing " << device_->joint_position_command);
-    //ROS_ERROR_STREAM("writing vel " << device_->joint_velocity_command);
+    if(!ready_for_command_){
+      ros::Duration dur = ros::Time::now() - ready_for_command_timer_;
 
-    std::vector<double> joint_pos_cmd = device_->joint_position_command;
-    std::vector<double> joint_vel_cmd = device_->joint_velocity_command;
+      if(dur.toSec() > ignore_command_duration_.toSec())
+        ready_for_command_ = true;
 
-    //Get the commanded a7 velocity
-    const int a7_index = IIWA_JOINTS-1;
-    double a7_cmd_vel = joint_vel_cmd[a7_index];
-
-    //Get the a7 joint position
-    double jp = device_->joint_position[a7_index];
-
-    //Get the  a7 joint limits
-    double a7_lower_limit = device_->joint_lower_limits[a7_index];
-    double a7_upper_limit = device_->joint_upper_limits[a7_index];
-
-    //Get the  a7 joint soft limits
-    double a7_lower_soft_limit = device_->joint_lower_soft_limits[a7_index];
-    double a7_upper_soft_limit = device_->joint_upper_soft_limits[a7_index];
-
-    //ROS_ERROR("limits %g %g soft %g %g", a7_lower_limit, a7_upper_limit, a7_lower_soft_limit, a7_upper_soft_limit);
-
-    double a7_joint_velocity_limit = device_->joint_velocity_limits[a7_index];
-
-    //ROS_ERROR("vel limit %g", a7_joint_velocity_limit);
-
-
-    /*
-    // compute the joint displacement over the current period.
-    double dt = period.toSec();
-    double a = 1.0; //Currently relative joint accelearation is 0.6*max_accel for safetly. Unkonwn max value.
-    double cmd_jp = jp + cmd_vel * dt + 0.5*a*dt*dt;
-
-    //Get the  a7 joint soft limits
-    double a7_upper_limit = device_->joint_upper_soft_limits[a7_index];
-    double a7_lower_limit = device_->joint_lower_soft_limits[a7_index];
-
-    ROS_ERROR_STREAM("curr pos" << jp << " cmd pos " << cmd_jp << " loop period " << dt);
-    ROS_ERROR_STREAM("lower lim " << a7_lower_limit << "upper lim " << a7_upper_limit);
-
-    device_->joint_position_command[a7_index] = cmd_jp;
-    last_joint_position_command_ = device_->joint_position_command;
-    */
+      ROS_WARN("Ignoring command for %g secs %g %g %g %g %g %g %g", (ignore_command_duration_ - dur).toSec(), device_->joint_velocity_command[0], device_->joint_velocity_command[1], device_->joint_position_command[2],
+      device_->joint_velocity_command[3], device_->joint_velocity_command[4], device_->joint_velocity_command[5], device_->joint_velocity_command[6]);
+    }
+    else
+    {
+      //TODO update last_joint_position_command
+      //last_joint_position_command_ = device_->joint_position_command;
+      fri_client_->setCommandValid(KukaFRIClient::CommandType::Velocity);
+    }
   }
 
   client_app_->step();
 
+  /*
   current_js_.position.clear();
   current_js_.effort.clear();
   current_js_.velocity.clear();
@@ -628,49 +784,13 @@ bool IIWA_HW::read(ros::Duration period)
   current_js_.header.stamp = ::ros::Time::now();
   current_js_.header.seq += 1;
   js_pub_.publish(current_js_);
+  */
 
   return 0;
 }
 
 bool IIWA_HW::write(ros::Duration period)
 {
-  /*
-  ej_sat_interface_.enforceLimits(period);
-  ej_limits_interface_.enforceLimits(period);
-  pj_sat_interface_.enforceLimits(period);
-  pj_limits_interface_.enforceLimits(period);
-
-  // Joint Position Control
-  if (interface_ == interface_type_.at(0))
-  {
-    if (device_->joint_position_command == last_joint_position_command_)  // avoid sending the same joint command over and over
-      return 0;
-
-    last_joint_position_command_ = device_->joint_position_command;
-
-    ROS_WARN("cmd %g %g %g %g %g %g %g", device_->joint_position_command[0], device_->joint_position_command[1], device_->joint_position_command[2],
-    device_->joint_position_command[3], device_->joint_position_command[4], device_->joint_position_command[5], device_->joint_position_command[6]);
-  }
-
-  */
-
-  /*
-
-
-  ros::Duration delta = ros::Time::now() - timer_;
-
-
-  }
-  // Joint Impedance Control
-  else if (interface_ == interface_type_.at(1)) {
-      // TODO
-  }
-  // Joint Velocity Control
-  else if (interface_ == interface_type_.at(2)) {
-      // TODO
-  }
-  */
-
   return 0;
 }
 
@@ -689,10 +809,14 @@ bool IIWA_HW::prepareSwitch(const std::list<hardware_interface::ControllerInfo>&
       if(start_controller == "PositionJointInterface_trajectory_controller")
       {
         interface_ = "PositionJointInterface";
+        ready_for_command_ = false;
+        ready_for_command_timer_ = ros::Time::now();
       }
       else if(start_controller == "VelocityJointInterface_trajectory_controller")
       {
         interface_ = "VelocityJointInterface";
+        ready_for_command_ = false;
+        ready_for_command_timer_ = ros::Time::now();
       }
       else
         ROS_ERROR("Unknown controller requested");
