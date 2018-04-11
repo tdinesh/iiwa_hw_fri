@@ -125,6 +125,8 @@ void KukaFRIClient::onStateChange(KUKA::FRI::ESessionState oldState,
       }
 
       */
+      ROS_WARN("FRI was reset, restart system");
+      inhibit_motion_in_command_state_ = true;
     }
   }
 }
@@ -248,14 +250,12 @@ void KukaFRIClient::command()
     }
     else if(command_type_ == CommandType::Velocity)
     {
-      ROS_WARN("Velocity Command");
-
       double current_pos[IIWA_JOINTS] = { 0., 0., 0., 0., 0., 0., 0.};
       std::memcpy(current_pos, state.getMeasuredJointPosition(),IIWA_JOINTS * sizeof(double));
 
       std::vector<double> joint_vel_cmd = device_->joint_velocity_command;
-      ROS_WARN("%g %g %g %g %g %g %g", joint_vel_cmd[0], joint_vel_cmd[1], joint_vel_cmd[2],
-        joint_vel_cmd[3], joint_vel_cmd[4], joint_vel_cmd[5], joint_vel_cmd[6]);
+      //ROS_WARN("Vel cmd %g %g %g %g %g %g %g", joint_vel_cmd[0], joint_vel_cmd[1], joint_vel_cmd[2],
+      //  joint_vel_cmd[3], joint_vel_cmd[4], joint_vel_cmd[5], joint_vel_cmd[6]);
 
       std::vector<double> commanded_pos = last_joint_position_command_;
 
@@ -299,9 +299,9 @@ void KukaFRIClient::command()
         cmd_pos[a7_index] = commanded_pos[a7_index];
 
         memcpy(pos, cmd_pos.data(), IIWA_JOINTS * sizeof(double));
-        //last_joint_position_command_ = cmd_pos;
+        last_joint_position_command_ = cmd_pos;
 
-        ROS_WARN("cmd %g %g %g %g %g %g %g", pos[0],pos[1],pos[2],pos[3],pos[4],pos[5],pos[6]);
+        //ROS_WARN("cmd %g %g %g %g %g %g %g", pos[0],pos[1],pos[2],pos[3],pos[4],pos[5],pos[6]);
 
       }
       else{
@@ -318,11 +318,13 @@ void KukaFRIClient::command()
            IIWA_JOINTS * sizeof(double));
     }
 
+    /*
     //Ovveride commands
     ROS_WARN("Ovveride, setting last command");
     assert(last_joint_position_command_.size() == IIWA_JOINTS);
     memcpy(pos, last_joint_position_command_.data(),IIWA_JOINTS * sizeof(double));
     ROS_WARN("cmd %g %g %g %g %g %g %g",pos[0],pos[1],pos[2],pos[3],pos[4],pos[5],pos[6]);
+    */
 
   }
   robotCommand().setJointPosition(pos);
@@ -392,6 +394,7 @@ IIWA_HW::IIWA_HW(ros::NodeHandle nh)
     interface_type_.push_back("PositionJointInterface");
     interface_type_.push_back("VelocityJointInterface");
     interface_type_.push_back("EffortJointInterface");
+    interface_type_.push_back("VelocityJointInterface_J7");
 
     params_ = std::make_tuple(
         "Robotiiwa"               , // RobotName,
@@ -750,8 +753,8 @@ bool IIWA_HW::read(ros::Duration period)
       }
     }
   }
-  // Joint Velocity Control
-  else if (interface_ == "VelocityJointInterface")
+  // Joint Velocity Control J7
+  else if (interface_ == "VelocityJointInterface_J7")
   {
     if(!ready_for_command_){
       ros::Duration dur = ros::Time::now() - ready_for_command_timer_;
@@ -812,9 +815,9 @@ bool IIWA_HW::prepareSwitch(const std::list<hardware_interface::ControllerInfo>&
         ready_for_command_ = false;
         ready_for_command_timer_ = ros::Time::now();
       }
-      else if(start_controller == "VelocityJointInterface_trajectory_controller")
+      else if(start_controller == "VelocityJointInterface_J7_controller")
       {
-        interface_ = "VelocityJointInterface";
+        interface_ = "VelocityJointInterface_J7";
         ready_for_command_ = false;
         ready_for_command_timer_ = ros::Time::now();
       }
