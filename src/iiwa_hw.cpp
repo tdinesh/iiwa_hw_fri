@@ -125,9 +125,12 @@ void KukaFRIClient::onStateChange(KUKA::FRI::ESessionState oldState,
       }
 
       */
-      ROS_WARN("FRI was reset, restart system");
-      inhibit_motion_in_command_state_ = true;
+      ROS_WARN("FRI was reset");
+      //inhibit_motion_in_command_state_ = true;
     }
+  }
+  else{
+    has_entered_command_state_ = false;
   }
 }
 
