@@ -22,6 +22,9 @@ You will need KUKA FRI source code. The current tested version is 1.11
 ```
 mkdir -p ~/ws_kuka/src
 cd ~/ws_kuka/src
+git clone https://github.com/IFL-CAMP/iiwa_stack.git
+cd iiwa_stack
+git checkout 3515f00c8b7614b8944bfd5306cf7b42c5dd334f
 git clone https://github.com/tdinesh/iiwa_hw_fri
 cd iiwa_hw_fri
 git checkout devel_velocity_control
@@ -36,7 +39,7 @@ catkin build
 
 ROS dependencies to install. Choose `kinetic/melodic` according to system
 ```
-sudo apt install ros-melodic-ros-control ros-melodic-octomap-msgs ros-melodic-object-recognition-msgs ros-melodic-realtime-tools ros-melodic-pcl-ros ros-melodic-control-toolbox ros-melodic-controller-manager ros-melodic-controller-interface ros-melodic-controller-manager-msgs ros-melodic-moveit ros-melodic-joint-state-controller ros-melodic-joint-trajectory-controller ros-melodic-position-controller ros-melodic-hardware-interface ros-melodic-ros-controllers ros-melodic-controller-manager
+sudo apt install ros-melodic-ros-control ros-melodic-octomap-msgs ros-melodic-object-recognition-msgs ros-melodic-realtime-tools ros-melodic-pcl-ros ros-melodic-control-toolbox ros-melodic-controller-manager ros-melodic-controller-interface ros-melodic-controller-manager-msgs ros-melodic-moveit ros-melodic-joint-state-controller ros-melodic-joint-trajectory-controller ros-melodic-position-controllers ros-melodic-hardware-interface ros-melodic-ros-controllers ros-melodic-controller-manager
 ```
 
 You'll need to configure the system which will communicate directly with the KONI interface.  This
